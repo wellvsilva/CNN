@@ -1,0 +1,153 @@
+from flask import Flask, request, render_template_string, redirect, url_for
+from PIL import Image
+import torch
+from torchvision import transforms
+import io
+import os
+
+app = Flask(__name__)
+
+# Carregar o modelo e o dicionário de classes
+melhor_modelo = torch.load('./modelos/melhor_modelo.pt')
+melhor_modelo.eval()
+classes_dict = {'naorachaduras': 0, 'rachaduras': 1}
+
+# Lista global para armazenar os caminhos das imagens
+imagens_paths = []
+
+def avaliar_varias_imagens(modelo, imagens_paths, classes_dict):
+    resultados = []
+    transformacao = transforms.Compose([
+        transforms.Resize((127, 127)),
+        transforms.ToTensor(),
+    ])
+    
+    for img_path in imagens_paths:
+        imagem = Image.open(img_path)
+        imagem_tensor = transformacao(imagem).unsqueeze(0)
+
+        with torch.no_grad():
+            saida = modelo(imagem_tensor)
+
+        _, previsao_indices = torch.max(saida, 1)
+        previsao_classes = [list(classes_dict.keys())[idx] for idx in previsao_indices.tolist()]
+        probabilidades = torch.softmax(saida, dim=1)[0].numpy()
+        probabilidades_porcentagem = [f"{probabilidade * 100:.2f}%" for probabilidade in probabilidades]
+
+        classe_correta = previsao_classes[0]
+        probabilidade_correta = probabilidades_porcentagem[previsao_indices.item()]
+        resultados.append((img_path, classe_correta, probabilidade_correta))
+    
+    return resultados
+
+@app.route("/", methods=["GET", "POST"])
+def index():
+    global imagens_paths
+
+    if request.method == "POST":
+        if 'file' in request.files:
+            files = request.files.getlist("file")
+            if not os.path.exists('static'):
+                os.makedirs('static')
+
+            # Salvar cada imagem e acumular os caminhos
+            for idx, file in enumerate(files):
+                img_path = f'static/uploaded_image_{len(imagens_paths) + idx}.jpg'
+                imagem = Image.open(io.BytesIO(file.read()))
+                imagem.save(img_path)
+                imagens_paths.append(img_path)
+
+            return redirect(url_for('index'))  # Redireciona para a página para mostrar a prévia das imagens
+
+        if 'verificar' in request.form:
+            # Avaliar as imagens quando o botão "Verificar Rachadura" for clicado
+            resultados = avaliar_varias_imagens(melhor_modelo, imagens_paths, classes_dict)
+            
+            resultados_html = ""
+            for img_path, classe, probabilidade in resultados:
+                resultados_html += f'''
+                    <div class="result">
+                        <img src="{{{{ url_for('static', filename='{os.path.basename(img_path)}') }}}}" alt="Imagem" style="max-width: 150px; height: auto; margin: 10px;">
+                        <p>Classe: <strong>{classe}</strong></p>
+                        <p>Probabilidade: <strong>{probabilidade}</strong></p>
+                    </div>
+                '''
+            
+            # Limpar as imagens após a verificação
+            imagens_paths = []
+
+            return render_template_string(f'''
+                <!doctype html>
+                <html lang="en">
+                <head>
+                    <meta charset="UTF-8">
+                    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                    <title>Resultado da Avaliação</title>
+                    <style>
+                        body {{ font-family: Arial, sans-serif; margin: 0; padding: 20px; background-color: #f0f0f0; color: #333; }}
+                        .container {{ max-width: 800px; margin: auto; text-align: center; background-color: #ffffff; padding: 20px; border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); }}
+                        h1 {{ color: #333; font-size: 28px; margin-bottom: 20px; }}
+                        .result {{ display: inline-block; margin: 10px; }}
+                        .button {{ background-color: #4CAF50; color: white; padding: 10px 20px; text-align: center; text-decoration: none; display: inline-block; font-size: 16px; margin-top: 10px; border-radius: 4px; cursor: pointer; }}
+                        .button:hover {{ background-color: #45a049; }}
+                    </style>
+                </head>
+                <body>
+                    <div class="container">
+                        <h1>Sistema de Detecção de Rachaduras - DEMO</h1>
+                        {resultados_html}
+                        <div>
+                            <a href="/" class="button">Upload novas imagens</a>
+                        </div>
+                    </div>
+                </body>
+                </html>
+                ''')
+
+    # Renderizar a página principal com a pré-visualização das imagens acumuladas
+    imagens_preview_html = ""
+    for img_path in imagens_paths:
+        imagens_preview_html += f'''
+            <img src="{{{{ url_for('static', filename='{os.path.basename(img_path)}') }}}}" alt="Imagem" style="max-width: 150px; height: auto; margin: 10px;">
+        '''
+    
+    return render_template_string(f'''
+        <!doctype html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Upload de Imagens</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; margin: 0; padding: 20px; background-color: #f0f0f0; color: #333; }}
+                .container {{ max-width: 800px; margin: auto; text-align: center; background-color: #ffffff; padding: 20px; border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); }}
+                h1 {{ color: #333; font-size: 28px; margin-bottom: 20px; }}
+                form {{ margin-top: 20px; }}
+                .button {{ background-color: #008CBA; color: white; padding: 10px 20px; text-align: center; text-decoration: none; display: inline-block; font-size: 16px; margin-top: 10px; border-radius: 4px; cursor: pointer; }}
+                .button:hover {{ background-color: #006E84; }}
+                .preview img {{ max-width: 150px; max-height: 150px; margin: 10px; display: inline-block; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>Sistema de Detecção de Rachaduras - MVP</h1>
+                <form method=post enctype=multipart/form-data>
+                  <input type="file" name="file" id="file" multiple accept="image/*" style="margin-bottom: 10px;">
+                  <br>
+                  <input type="submit" value="Adicionar Mais" class="button">
+                </form>
+
+                <div class="preview" id="preview">
+                    {imagens_preview_html}  <!-- Mostrar imagens pré-carregadas -->
+                </div>
+
+                <form method="post">
+                    <button name="verificar" type="submit" class="button">Verificar Rachadura</button>
+                </form>
+            </div>
+        </body>
+        </html>
+        ''')
+
+if __name__ == "__main__":
+    app.run()
